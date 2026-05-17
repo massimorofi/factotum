@@ -1,0 +1,22 @@
+# Stage 1: Build the fast-jar distribution package
+FROM maven:3.9.6-eclipse-temurin-21-alpine AS build
+WORKDIR /usr/src/app
+COPY pom.xml .
+COPY factotum-core/pom.xml factotum-core/
+COPY factotum-cli/pom.xml factotum-cli/
+RUN mvn dependency:go-offline -B
+COPY factotum-core ./factotum-core
+COPY factotum-cli ./factotum-cli
+RUN mvn package -DskipTests
+
+# Stage 2: Clean runtime target container
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /deployments
+COPY --from=build /usr/src/app/factotum-core/target/quarkus-app/lib/ /deployments/lib/
+COPY --from=build /usr/src/app/factotum-core/target/quarkus-app/*.jar /deployments/
+COPY --from=build /usr/src/app/factotum-core/target/quarkus-app/app/ /deployments/app/
+COPY --from=build /usr/src/app/factotum-core/target/quarkus-app/quarkus/ /deployments/quarkus/
+
+EXPOSE 8080
+ENV JAVA_OPTIONS="-Dquarkus.http.host=0.0.0.0 -Djava.util.logging.manager=org.jboss.logmanager.LogManager"
+ENTRYPOINT [ "sh", "-c", "java $JAVA_OPTIONS -jar /deployments/quarkus-run.jar" ]

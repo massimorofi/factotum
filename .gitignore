@@ -1,0 +1,32 @@
+# Maven build artifacts
+target/
+*.class
+*.jar
+*.war
+
+# IDE files
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.project
+.classpath
+.settings/
+
+# Quarkus
+quarkus/
+
+# GraalVM native image
+native-image/
+.graalvm/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Test results
+test-results.txt
