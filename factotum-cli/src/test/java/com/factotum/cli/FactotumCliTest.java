@@ -4,7 +4,6 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import picocli.CommandLine;
-import picocli.CommandLine.ParameterException;
 
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStreamWriter;
@@ -17,10 +16,6 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @DisplayName("FactotumCli")
 class FactotumCliTest {
-
-    private PrintWriter captureStream() {
-        return new PrintWriter(new OutputStreamWriter(new ByteArrayOutputStream()), true);
-    }
 
     // ── Root command tests ──────────────────────────────────────────────
 
@@ -50,12 +45,14 @@ class FactotumCliTest {
         @DisplayName("CLI-010: No arguments shows help (subcommands available)")
         void testNoArgumentsShowsSubcommands() {
             FactotumCli cli = new FactotumCli();
-            PrintWriter out = captureStream();
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+
+            PrintWriter out = new PrintWriter(new OutputStreamWriter(baos), true);
             CommandLine cmd = new CommandLine(cli);
             cmd.setOut(out);
             int exitCode = cmd.execute();
             assertEquals(0, exitCode);
-            String output = out.toString();
+            String output = baos.toString();
             assertTrue(output.contains("send"), "Help should mention 'send' subcommand");
             assertTrue(output.contains("health"), "Help should mention 'health' subcommand");
             assertTrue(output.contains("status"), "Help should mention 'status' subcommand");
@@ -160,30 +157,30 @@ class FactotumCliTest {
         }
 
         @Test
-        @DisplayName("CLI-020: Invalid body (not a JSON object) throws ParameterException")
+        @DisplayName("CLI-020: Invalid body (not a JSON object) returns exit code 2")
         void testInvalidBodyNotJsonObject() {
             FactotumCli.Send send = new FactotumCli.Send();
             CommandLine cmd = new CommandLine(send);
-            assertThrows(ParameterException.class, () ->
-                cmd.execute("-b", "not-json"));
+            int exitCode = cmd.execute("-b", "not-json");
+            assertEquals(2, exitCode);
         }
 
         @Test
-        @DisplayName("CLI-021: Invalid body (JSON array) throws ParameterException")
+        @DisplayName("CLI-021: Invalid body (JSON array) returns exit code 2")
         void testInvalidBodyIsArray() {
             FactotumCli.Send send = new FactotumCli.Send();
             CommandLine cmd = new CommandLine(send);
-            assertThrows(ParameterException.class, () ->
-                cmd.execute("-b", "[1,2,3]"));
+            int exitCode = cmd.execute("-b", "[1,2,3]");
+            assertEquals(2, exitCode);
         }
 
         @Test
-        @DisplayName("CLI-022: Empty body throws ParameterException")
+        @DisplayName("CLI-022: Empty body returns exit code 2")
         void testEmptyBody() {
             FactotumCli.Send send = new FactotumCli.Send();
             CommandLine cmd = new CommandLine(send);
-            assertThrows(ParameterException.class, () ->
-                cmd.execute("-b", ""));
+            int exitCode = cmd.execute("-b", "");
+            assertEquals(2, exitCode);
         }
 
         @Test
@@ -318,7 +315,7 @@ class FactotumCliTest {
             try {
                 FactotumCli.Health health = new FactotumCli.Health();
                 CommandLine healthCmd = new CommandLine(health);
-                healthCmd.execute("health");
+                healthCmd.execute();
 
                 String output = baos.toString();
                 assertTrue(output.toLowerCase().contains("failed") || output.toLowerCase().contains("connection"),
@@ -410,8 +407,12 @@ class FactotumCliTest {
     @DisplayName("Envelope Construction")
     class EnvelopeConstructionTests {
 
-        /** Helper to start a ServerSocket that captures one request body. */
-        private String captureRequestBody(java.net.ServerSocket ss, int timeoutMs) throws InterruptedException {
+        /**
+         * Captures the body of a single HTTP request received on the given ServerSocket.
+         * Starts the acceptor thread first, then runs the provided runnable (which sends
+         * an HTTP request to the same port), waits for the request to be captured.
+         */
+        private String captureRequestBody(java.net.ServerSocket ss, int timeoutMs, Runnable sender) throws InterruptedException {
             AtomicReference<String> captured = new AtomicReference<>();
             Thread acceptor = new Thread(() -> {
                 try {
@@ -443,7 +444,16 @@ class FactotumCliTest {
                 }
             });
             acceptor.start();
-            acceptor.join(timeoutMs + 1000);
+
+            // Small delay to ensure acceptor is blocking on accept() before sender connects
+            Thread.sleep(50);
+
+            try {
+                sender.run();
+            } catch (Exception ignored) {
+            }
+
+            acceptor.join(timeoutMs + 2000);
 
             if (!acceptor.isAlive()) {
                 return captured.get();
@@ -463,15 +473,18 @@ class FactotumCliTest {
                 FactotumCli.Send send = new FactotumCli.Send();
                 CommandLine cmd = new CommandLine(send);
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                System.setErr(new PrintStream(baos));
-                try {
-                    cmd.execute("-b", "{\"action\":\"verify\"}", "-q", "test_q", "-s", "tester");
-                } finally {
-                    System.setErr(System.err);
-                    System.clearProperty("factotum.api.url");
-                }
+                PrintStream oldErr = System.err;
 
-                String body = captureRequestBody(ss, 5000);
+                Runnable sender = () -> {
+                    System.setErr(new PrintStream(baos));
+                    try {
+                        cmd.execute("-b", "{\"action\":\"verify\"}", "-q", "test_q", "-s", "tester");
+                    } finally {
+                        System.setErr(oldErr);
+                    }
+                };
+
+                String body = captureRequestBody(ss, 5000, sender);
                 if (body == null) {
                     fail("Server did not receive a request within timeout");
                 }
@@ -484,6 +497,7 @@ class FactotumCliTest {
                 assertTrue(body.contains("\"timestamp\""), "Envelope must have a timestamp");
                 assertTrue(body.contains("\"action\":\"verify\""), "Body payload must be preserved");
             } finally {
+                System.clearProperty("factotum.api.url");
                 ss.close();
             }
         }
@@ -499,20 +513,24 @@ class FactotumCliTest {
                 FactotumCli.Send send = new FactotumCli.Send();
                 CommandLine cmd = new CommandLine(send);
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                System.setErr(new PrintStream(baos));
-                try {
-                    cmd.execute("-b", "{\"action\":\"verify\"}", "-q", "test_q", "-s", "tester");
-                } finally {
-                    System.setErr(System.err);
-                    System.clearProperty("factotum.api.url");
-                }
+                PrintStream oldErr = System.err;
 
-                String body = captureRequestBody(ss, 5000);
+                Runnable sender = () -> {
+                    System.setErr(new PrintStream(baos));
+                    try {
+                        cmd.execute("-b", "{\"action\":\"verify\"}", "-q", "test_q", "-s", "tester");
+                    } finally {
+                        System.setErr(oldErr);
+                    }
+                };
+
+                String body = captureRequestBody(ss, 5000, sender);
                 assertNotNull(body, "Server should have received a request");
 
                 assertTrue(body.matches("(?s).*\"messageId\":\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\".*"),
                     "messageId should be a valid UUID");
             } finally {
+                System.clearProperty("factotum.api.url");
                 ss.close();
             }
         }
@@ -528,20 +546,24 @@ class FactotumCliTest {
                 FactotumCli.Send send = new FactotumCli.Send();
                 CommandLine cmd = new CommandLine(send);
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                System.setErr(new PrintStream(baos));
-                try {
-                    cmd.execute("-b", "{\"action\":\"test\"}");
-                } finally {
-                    System.setErr(System.err);
-                    System.clearProperty("factotum.api.url");
-                }
+                PrintStream oldErr = System.err;
 
-                String body = captureRequestBody(ss, 5000);
+                Runnable sender = () -> {
+                    System.setErr(new PrintStream(baos));
+                    try {
+                        cmd.execute("-b", "{\"action\":\"test\"}");
+                    } finally {
+                        System.setErr(oldErr);
+                    }
+                };
+
+                String body = captureRequestBody(ss, 5000, sender);
                 assertNotNull(body, "Server should have received a request");
 
                 assertTrue(body.contains("\"destination\":\"factotum_inbound\""),
                     "Default queue should be factotum_inbound in envelope");
             } finally {
+                System.clearProperty("factotum.api.url");
                 ss.close();
             }
         }

@@ -56,10 +56,16 @@ public class FactotumCli implements Runnable {
         return key != null ? key : "dev-token-123";
     }
 
+    @Spec
+    CommandSpec spec;
+
     /** Show available subcommands when no arguments are given. */
     @Override
     public void run() {
-        new CommandLine(this).usage(System.out);
+        java.io.PrintWriter out = new java.io.PrintWriter(spec.commandLine().getOut(), true);
+        out.println("Factotum AI Command Line Interface");
+        spec.root().commandLine().usage(out);
+        out.flush();
     }
 
     // ── Subcommand: send ────────────────────────────────────────────────
